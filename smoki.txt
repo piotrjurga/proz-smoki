@@ -1,0 +1,23 @@
+* nekromanta z grupy posiadający token bierze zadanie
+    > nekromanci przechowują informacje o tym kto jest zajęty
+    > token przekazywany jest do następnego w pierścieniu dostępnego nekromanty
+    > jeżeli wszystko jest zajęte, to czekamy na pierwszy, który się zwolni i mu przesyłamy token
+    > gdy proces dostaje token, dostaje też dane o tym, które procesy są zajęte
+    > lista zajętości z tokenu jest porównywana z przechowywaną listą i jeżeli token nie uwzględnia zwolnienia procesu, o którym wiadomo, to jest to korygowane
+    > jeżeli liczba obsłużonych zadań z tokenu jest mniejsza niż ta zapamiętana przez dany proces, natychmiast dochodzi do obsługi kolejnego i zaktualizowany token przekazywany jest dalej (jeżeli wszystko zajęte j/w)
+    > gdy proces się zwalnia, wysyła o tym wiadomość do wszystkich pozostałych
+
+* nekromanci głów, ciał i ogonów tworzą trzy osobne pierścienie funkcjonujące j/w
+* zleceniodawca wysyła zapytania do głów
+* głowa z zadaniem pozyskuje najpierw ciało, potem ogon
+* sprawdzanie czy jest dość biurek wg algorytmu Ricarta-Agrawali
+* sprawdzanie czy jest dość szkieletów wg algorytmu Ricarta-Agrawali
+
+struct token {
+    u32 tasks_handled;
+    u32 current_process_task[N];
+};
+
+struct necro_data {
+    u32 last_task_completed[N];
+};
