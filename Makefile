@@ -1,2 +1,2 @@
 smoki: main.c
-	mpicc -g -osmoki main.c
+	mpicc -g -Wall -osmoki main.c
