@@ -1,5 +1,4 @@
 // problemy:
-// ! pomijanie już obsłużonych zadań: MOGĄ PRZYJŚĆ W INNEJ KOLEJNOŚCI
 // - nie wspieramy działania wiecznie, kiedyś requests_received się przepełni
 // - requests to powinien być circular buffer a nie tablica dynamiczna,
 //   przez to kopiujemy całą tablicę częściej niż trzeba
@@ -19,7 +18,7 @@
 #define DRAGON_COUNT 3
 
 // time in seconds
-#define TASK_GENERATION_DELAY 0.0
+#define TASK_GENERATION_DELAY 0.01
 
 //
 // HEADERS
@@ -46,32 +45,6 @@ typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-
-typedef struct timespec timespec;
-
-inline timespec get_time() {
-    timespec temp;
-    //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &temp);
-    clock_gettime(CLOCK_MONOTONIC, &temp);
-    return temp;
-}
-
-timespec time_diff(timespec start, timespec end) {
-    timespec temp;
-    if ((end.tv_nsec-start.tv_nsec)<0) {
-        temp.tv_sec = end.tv_sec-start.tv_sec-1;
-        temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
-    } else {
-        temp.tv_sec = end.tv_sec-start.tv_sec;
-        temp.tv_nsec = end.tv_nsec-start.tv_nsec;
-    }
-    return temp;
-}
-
-inline bool time_less_than(timespec a, timespec b) {
-    timespec res = time_diff(a, b);
-    return res.tv_sec < 0 || res.tv_nsec < 0;
-}
 
 #ifdef RELEASE
 #define mpi_assert(x)
@@ -115,7 +88,6 @@ ProcessType get_process_type(u32 n) {
     if      (n == TASK_GENERATOR) return TaskGenerator;
     else if (n < NECRO_TAIL_END)  return NecroTail;
     else if (n < NECRO_BODY_END)  return NecroBody;
-    //else                          return NecroHead;
     else if (n < NECRO_HEAD_END)  return NecroHead;
     else return DebugPrinter;
 }
@@ -169,9 +141,8 @@ union __MAX_RING_ARRAY{
 
 #define MAX_RING_COUNT (sizeof(union __MAX_RING_ARRAY) / sizeof(u32))
 
-//MsgToken
 typedef struct {
-    u32 requests_handled;
+    u32 requests_handled[PROCESS_COUNT];
     u32 current_task[MAX_RING_COUNT];
 } MessageToken;
 
@@ -209,8 +180,8 @@ typedef struct {
     u32 index;
     u32 begin;
     u32 count;
-    u32 requests_received;
-    u32 requests_handled;
+    u32 requests_received[PROCESS_COUNT];
+    u32 requests_handled[PROCESS_COUNT];
     u32 current_task_issuer;
     bool has_token;
     bool pass_token_to_first_free;
@@ -240,8 +211,12 @@ bool ring_pass_token(Ring *r) {
         mpi_assert(next != r->index);
         u32 next_rank = r->begin + next;
         MessageToken new_token = {};
-        new_token.requests_handled = r->requests_handled;
-        memcpy(new_token.current_task, r->current_task, r->count*sizeof(u32));
+        memcpy(new_token.requests_handled,
+               r->requests_handled,
+               PROCESS_COUNT*sizeof(u32));
+        memcpy(new_token.current_task,
+               r->current_task,
+               r->count*sizeof(u32));
         send_msg(new_token, MsgToken, next_rank);
         return true;
     } else {
@@ -251,31 +226,38 @@ bool ring_pass_token(Ring *r) {
 
 void ring_accept_task(Ring *r) {
     mpi_assert(r->has_token);
-    r->requests_handled++;
-    r->current_task_issuer = r->requests[0];
+    u32 source = r->requests[0];
+    r->requests_handled[source]++;
+    r->current_task_issuer = source;
     arrdel(r->requests, 0);
     r->has_token = false;
-    r->current_task[r->index] = r->requests_handled;
+    u32 sum = 0;
+    for (u32 i = 0; i < PROCESS_COUNT; i++) {
+        sum += r->requests_handled[i];
+    }
+    r->current_task[r->index] = sum;
     if (!ring_pass_token(r)) {
         r->pass_token_to_first_free = true;
     }
 }
 
-void ring_handle_request(Ring *r, u32 task_id, MPI_Status status) {
+void ring_handle_request(Ring *r, MPI_Status status) {
     u32 rank = r->begin + r->index;
-    r->requests_received++;
-    if (r->requests_handled < r->requests_received) {
-        arrpush(r->requests, status.MPI_SOURCE);
+    u32 source = status.MPI_SOURCE;
+    r->requests_received[source]++;
+    if (r->requests_handled[source] < r->requests_received[source]) {
+        arrpush(r->requests, source);
         if (r->has_token) {
-            log("take request %u, handled %u",
-                r->requests_received, r->requests_handled);
+            log("source %u, take request %u, handled %u",
+                source,
+                r->requests_received[source],
+                r->requests_handled[source]);
             ring_accept_task(r);
         }
     }
 }
 
 void ring_handle_token(Ring *r, MessageToken token) {
-    u32 rank = r->begin + r->index;
     mpi_assert(!r->has_token);
     r->has_token = true;
     // fix token info
@@ -285,38 +267,23 @@ void ring_handle_token(Ring *r, MessageToken token) {
         }
     }
     memcpy(r->current_task, token.current_task, r->count*sizeof(u32));
-    u32 req_count = arrlenu(r->requests);
-#ifndef RELEASE
-    if (req_count != r->requests_received - r->requests_handled) {
-        log("Incorrect number of requests: \n"
-            "\treq_count = %u\n"
-            "\trequests_received = %u\n"
-            "\trequests_handled = %d",
-            req_count,
-            r->requests_received,
-            r->requests_handled);
-        mpi_assert(false);
+
+    // forget remembered requests if they were handled
+    for (u32 i = 0; i < PROCESS_COUNT; i++) {
+        mpi_assert(r->requests_handled[i] <= token.requests_handled[i]);
+        while (r->requests_handled[i] < token.requests_handled[i]) {
+            for (u32 j = 0; j < arrlenu(r->requests); j++) {
+                if (r->requests[j] == i) {
+                    arrdel(r->requests, j);
+                    break;
+                }
+            }
+            r->requests_handled[i]++;
+        }
     }
-#endif
-    if (r->requests_received < token.requests_handled) {
-        // token issuer has handled more requests than we have seen
-        // so when they come, we need to ignore them
-        log("handled %u, received %u",
-            token.requests_handled, r->requests_received);
-        r->requests_handled = token.requests_handled;
-        arrsetlen(r->requests, 0);
-    } else {
-        s32 to_forget = token.requests_handled - r->requests_handled;
-        mpi_assert(to_forget >= 0);
-        if (to_forget > 0) {
-            //log("forgetting %d", to_forget);
-            arrdeln(r->requests, 0, to_forget);
-            r->requests_handled = token.requests_handled;
-        }
-        s32 not_handled = r->requests_received - token.requests_handled;
-        if (not_handled > 0) {
-            ring_accept_task(r);
-        }
+
+    if (arrlen(r->requests) > 0) {
+        ring_accept_task(r);
     }
 }
 
@@ -470,7 +437,6 @@ void necro_head_loop(u32 rank) {
             } break;
 
             case MsgRingAccept: {
-                //mpi_assert(state == StateWaitForTheGuys);
                 if (state != StateWaitForTheGuys) {
                     log("current state: %d", state);
                     log("body: %d", body_rank);
@@ -537,6 +503,7 @@ void necro_head_loop(u32 rank) {
 
             case StateWaitForDesk: {
                 if (desk.ack_received + DESK_COUNT > NECRO_HEAD_COUNT) {
+                    log("Desk acquired after %u acks", desk.ack_received);
                     desk.acquired = true;
 
                     u32 current_task = r.current_task[r.index];
@@ -551,6 +518,7 @@ void necro_head_loop(u32 rank) {
 
             case StateWaitForSkeleton: {
                 if (desk.ack_received + DRAGON_COUNT > NECRO_HEAD_COUNT) {
+                    log("Skeleton acquired after %u acks", desk.ack_received);
                     skeleton.acquired = true;
 
                     log("got body %u and tail %u\n\n", body_rank, tail_rank);
@@ -578,20 +546,18 @@ void necro_head_loop(u32 rank) {
 }
 
 void task_generator_loop() {
-    //u32 rank = 0;
     u32 task_count = 0;
     for (;;) {
         for (u32 i = NECRO_HEAD_BEGIN; i < NECRO_HEAD_END; i++) {
             send_msg(MsgNewTask, i);
         }
         task_count++;
-        if (task_count >= 128) break;
+        //if (task_count >= 3) break;
         usleep(1000*1000*TASK_GENERATION_DELAY);
     }
 }
 
 void debug_printer_loop(u32 rank) {
-#if 1
     for (;;) {
         u32 target;
         MPI_Status status = {};
@@ -605,7 +571,6 @@ void debug_printer_loop(u32 rank) {
                 get_process_type_string(target), target,
                 msg_type);
     }
-#endif
 }
 
 
