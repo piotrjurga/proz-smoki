@@ -11,11 +11,11 @@
 #define RELEASE
 #endif
 
-#define NECRO_TAIL_COUNT 2
-#define NECRO_BODY_COUNT 3
-#define NECRO_HEAD_COUNT 4
-#define DESK_COUNT   6
-#define DRAGON_COUNT 3
+#define NECRO_TAIL_COUNT 17
+#define NECRO_BODY_COUNT 13
+#define NECRO_HEAD_COUNT 19
+#define DESK_COUNT   11
+#define DRAGON_COUNT 15
 
 // time in seconds
 #define TASK_GENERATION_DELAY 0.01
@@ -517,8 +517,8 @@ void necro_head_loop(u32 rank) {
             } break;
 
             case StateWaitForSkeleton: {
-                if (desk.ack_received + DRAGON_COUNT > NECRO_HEAD_COUNT) {
-                    log("Skeleton acquired after %u acks", desk.ack_received);
+                if (skeleton.ack_received + DRAGON_COUNT > NECRO_HEAD_COUNT) {
+                    log("Skeleton acquired after %u acks", skeleton.ack_received);
                     skeleton.acquired = true;
 
                     log("got body %u and tail %u\n\n", body_rank, tail_rank);
